@@ -1,0 +1,20 @@
+<div class="sf-editor" tabindex="0">
+ <div class="sf-editor-head"><div><strong>Section sketcher</strong><span>Closed outlines · inches · horizontal z / vertical y</span></div><div class="sf-editor-actions"><button data-act="fit">Fit view</button><button class="sf-close-panel" data-act="close-panel">Close sketcher</button></div></div>
+ <div class="sf-toolbar">
+  <button data-tool="select" class="active">Select / move</button><button data-tool="line">Line / polyline</button><button data-tool="rectangle">Rectangle</button><button data-tool="circle">Circle</button><button data-tool="arc">Arc</button><button data-tool="pan">Pan</button>
+  <select class="sf-op" aria-label="Material operation"><option value="add">Add material</option><option value="subtract">Subtract / hole</option></select>
+ </div>
+ <div class="sf-parameters">
+  <label>z / centre<input class="sf-z" type="number" value="0" step="0.5"></label><label>y / centre<input class="sf-y" type="number" value="0" step="0.5"></label>
+  <label>Width<input class="sf-w" type="number" value="3" min="0.001" step="0.5"></label><label>Height<input class="sf-h" type="number" value="3" min="0.001" step="0.5"></label>
+  <label>Radius<input class="sf-r" type="number" value="0.25" min="0" step="0.5"></label><label>Start °<input class="sf-a0" type="number" value="0" step="15"></label><label>End °<input class="sf-a1" type="number" value="90" step="15"></label>
+  <button data-act="numeric">Add / update shape</button><button data-act="vertex">Add point</button><button data-act="close">Close outline</button>
+ </div>
+ <div class="sf-dimension-hint">Click a dimension to edit it. While drawing a line, press Tab to enter its exact length, then Enter to place its endpoint.</div>
+ <div class="sf-canvas-wrap"><svg class="sf-canvas" viewBox="-1 -5 8 6" aria-label="Cross-section drawing canvas"><defs><pattern id="sf-grid" patternUnits="userSpaceOnUse" width="0.25" height="0.25"><path d="M 0.25 0 L 0 0 0 0.25" fill="none" stroke="#dbe4ed" stroke-width="0.009"/></pattern></defs><rect class="sf-grid-bg" x="-10000" y="-10000" width="20000" height="20000" fill="url(#sf-grid)"/><g class="sf-shapes"></g><g class="sf-draft"></g></svg><div class="sf-dimensions"></div><div class="sf-dimension-edit" hidden><label><span class="sf-dimension-title">Length (in)</span><input class="sf-dimension-value" type="number" step="0.5" min="0.000001" aria-label="Dimension value in inches"></label><button data-dimension="apply">Set</button><button data-dimension="cancel" aria-label="Cancel dimension edit">×</button></div><span class="sf-coordinates">z 0.000, y 0.000</span></div>
+ <div class="sf-toolbar sf-secondary"><label><input class="sf-snap" type="checkbox" checked> Snap</label><label><input class="sf-ortho" type="checkbox"> Ortho</label><label>Grid <input class="sf-grid-step" type="number" min="0.001" step="0.5" value="0.125"></label>
+  <button data-act="undo">Undo</button><button data-act="redo">Redo</button><button data-act="copy">Copy</button><button data-act="rotate">Rotate 90°</button><button data-act="mirror">Mirror</button><button data-act="delete">Delete</button>
+ </div>
+ <div class="sf-toolbar sf-secondary"><label>Corner / edge # <input class="sf-corner" type="number" min="1" step="1" value="1"></label><button data-act="fillet">Fillet corner</button><button data-act="arc-edge">Arc edge</button><button data-act="reverse-arc">Reverse arc</button><button data-act="clear-draft">Cancel outline</button><button data-act="clear">Clear drawing</button></div>
+ <div class="sf-editor-status">Empty canvas: choose a tool to start. Close an outline to create material. Click size labels to edit them; Close sketcher keeps your drawing.</div>
+</div>
