@@ -1,6 +1,6 @@
 # Frame Load Analyzer
 
-A separate Python/Streamlit app for the nominal bending response of shipping frames with **2 to 5 beam layers**. Units are **inches, lbf and psi**. The layout follows the earlier tube stress and centre-of-gravity apps, with independent source files and state keys so the apps can be combined later.
+A separate Python/Streamlit app for the nominal bending response of shipping frames, with **beam layers added individually**. Units are **inches, lbf and psi**. The layout follows the earlier tube stress and centre-of-gravity apps, with independent source files and state keys so the apps can be combined later.
 
 ## Start the app
 
@@ -17,7 +17,7 @@ For Streamlit Community Cloud, upload **all Python files, `requirements.txt`, th
 
 ## Enter a frame
 
-1. In **Design**, choose the number of beam layers. A fully welded built-up section counts as one layer.
+1. In **Design**, click **Add beam layer** to add one layer at a time. There is no fixed layer-count limit. A fully welded built-up section counts as one layer.
 2. Expand each beam's row, then set its longitudinal start, length and vertical datum. Choose an angle, HSS, C-channel, a listed welded combination, a section with a flat bar, **Custom draw**, or **Custom properties**. Expanding/editing a beam or clicking **Inspect this beam** selects its cross-section view; the **Inspect beam** controls can also switch the view.
 3. For welded combinations, set the component dimensions, orientation and offsets. Components can cover different portions of the beam length. Full composite action is assumed where the components overlap; weld capacity is not calculated.
 4. Add lifting holes and rectangular blocks under the design inputs for their parent beam.
@@ -26,7 +26,11 @@ For Streamlit Community Cloud, upload **all Python files, `requirements.txt`, th
 7. In **Loading**, enter the total coil-package weight and how it is shared between longitudinal shipping frames. Enter relative coil weight shares if the coils have different weights. Beam/block/rod self-weight can be included automatically.
 8. Review **Material**, then inspect the result tabs. The default load multiplier is 1.0 for static gravity; any project lifting multiplier must be supplied by the user.
 
-The default design has **2 beams and no coils, rods, lifting points, blocks or additional loads**. Examples are added only when you choose to load one. Results update after a nonzero load is entered. Inputs, frame preview and the remaining section preview update together. Invalid changed inputs display a message without showing an older design's results.
+The default design has **2 beams and no coils, rods, lifting points, blocks or additional loads**. Examples are added only when you choose to load one. The schematic and remaining-section view update while you edit. Press **Calculate results** (or the sidebar's **Calculate / refresh results**) to run the full analysis. After a design, loading or material change, the old results are hidden until you calculate again. Switching views and changing the inspection station reuse the current solution.
+
+Each beam row has a **Remove layer** button. Removing a layer also removes rods connected to it, its lifting points, blocks and additional loads. Coil bearing selections referencing it return to Auto; the coils and other layers are retained. At least one layer remains. A newly added layer opens for editing and becomes the inspected beam. Saved models can contain more than five layers.
+
+Identical immutable material sections share a bounded property cache, including their shear properties. This avoids repeating polygon integrations at every station when the section is unchanged. Exact geometry is the cache key; section properties and the mechanical equations are unchanged. On Streamlit versions with stateful tabs, only the selected result tab is rendered, so hidden graphs and calculation worksheets do not add work to each refresh.
 
 A colored dashed line on the frame marks the selected section's **X position**. The X/Y rulers use the common frame datum. A beam keeps its color in the schematic, section preview, sketcher and calculation-page section drawings. Additional point loads and distributed loads appear on their assigned beams, including direction and factored magnitude; uniform loads also show intensity.
 
@@ -113,7 +117,7 @@ npm install --prefix tests
 npm test --prefix tests
 ```
 
-Node is **not required to run the app**. Reference coverage includes solid/hollow/angle sections, section subtraction, bearing depth alignment, closed-form simply supported beams with bending/shear deflection, asymmetric/equal reactions, unilateral contact, finite rod stiffness, block engagement, mesh refinement, 2–5 layers, model round trips and Streamlit control/worksheet interactions. The recorded checks are implementation verification, not certification of a particular shipping frame.
+Node is **not required to run the app**. Reference coverage includes solid/hollow/angle sections, section subtraction, bearing depth alignment, closed-form simply supported beams with bending/shear deflection, asymmetric/equal reactions, unilateral contact, finite rod stiffness, block engagement, mesh refinement, single-layer and more-than-five-layer models, model round trips and Streamlit control/worksheet interactions. The recorded checks are implementation verification, not certification of a particular shipping frame.
 
 The files in `verification/` retain the original mechanical benchmark record. The updated interface, tab resets and editable sketch dimensions are covered by the current tests in `tests/`.
 

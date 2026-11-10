@@ -85,7 +85,11 @@ def ring_integrals(coords):
         ((x*x+x*xx+xx*xx)*cross).sum()/12,
         ((2*x*y+x*yy+xx*y+2*xx*yy)*cross).sum()/24])
 
+@lru_cache(maxsize=2048)
 def section_properties(g, with_shear=False, allow_sliver=False):
+    # Shapely geometries are immutable/hashable and Section is frozen. Reuse
+    # identical material sections at different beam stations and reruns. The
+    # exact geometry is the key: no rounding or stiffness approximation.
     if g.is_empty or g.area<=1e-10:
         raise ModelError('A coil cut removes the complete section. Change the beam or coil position/dimensions.')
     # Shift first, to avoid cancellation for a small section far from the datum.

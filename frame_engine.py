@@ -77,7 +77,7 @@ class Solution:
 
 def validate_model(model,geometry=None):
     g=geometry or Geometry(model);bs=g.beams;ids=list(bs)
-    if not 2<=len(bs)<=5:raise ModelError('Choose between 2 and 5 beam layers.')
+    if not bs:raise ModelError('Add at least one beam layer.')
     if len(bs)!=len(model['beams']):raise ModelError('Beam IDs must be unique.')
     for name in ['frame','rod']:
         a=model['materials'][name]

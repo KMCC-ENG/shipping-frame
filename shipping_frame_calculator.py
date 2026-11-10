@@ -13,6 +13,19 @@ from frame_calculations import render_calculations
 
 ROOT=Path(__file__).resolve().parent
 _EDITOR=None
+RESULT_TABS=['Bending moment','Shear force','Deflection','Stress','Forces','Calculations']
+
+def result_tabs():
+ import streamlit as st
+ # Stateful tabs expose .open in recent Streamlit versions, so expensive
+ # graphs/worksheets are built only when they are actually being viewed.
+ if 'on_change' in inspect.signature(st.tabs).parameters:
+  return st.tabs(RESULT_TABS,key='sf_result_tab',on_change='rerun')
+ return st.tabs(RESULT_TABS)
+
+def tab_is_open(tab):
+ state=getattr(tab,'open',None)
+ return state if isinstance(state,bool) else True
 
 def initialize_state():
  import streamlit as st
@@ -73,19 +86,37 @@ def import_uploaded():
   m=load_model(f.getvalue().decode('utf-8'));replace_model(m)
  except (ModelError,ValueError,KeyError,UnicodeError) as e:st.session_state.sf_import_error=str(e)
 
-def layer_change():
+def add_beam_layer():
  import streamlit as st
- m=st.session_state.sf_model;n=int(st.session_state.sf_layer_count)
- while len(m['beams'])<n:m['beams'].append(new_beam(len(m['beams'])+1))
- if len(m['beams'])>n:
-  m['beams']=m['beams'][:n];valid={b['id'] for b in m['beams']}
-  m['rods']=[r for r in m['rods'] if r['weld'] in valid and r['nut'] in valid]
-  for k in ['pins','blocks','loads']:m[k]=[q for q in m[k] if q['beam'] in valid]
-  for c in m['coils']:
-   for side in ['lower','upper']:
-    if c.get(side,'Auto') not in valid|{'Auto','None'}:c[side]='Auto'
-  if st.session_state.get('sf_active_beam') not in valid:st.session_state.pop('sf_active_beam',None)
-  if st.session_state.get('sf_editor_beam') not in valid:close_editor()
+ m=st.session_state.sf_model;b=new_beam(next_id(m['beams'],'B'))
+ b['y']=max((q['y'] for q in m['beams']),default=-5.)+5.
+ m['beams'].append(b);activate_beam(b['id'])
+ st.session_state['sf_beam_panel_'+b['id']]=True
+
+def remove_beam_layer(bid):
+ import streamlit as st
+ m=st.session_state.sf_model
+ if len(m['beams'])<=1:return
+ index=next((i for i,b in enumerate(m['beams']) if b['id']==bid),None)
+ if index is None:return
+ m['beams'].pop(index)
+ prefixes=['sf_beam_'+bid+'_','sf_inspect_'+bid+'_']
+ # Remove attachments and their widget values so a subsequently reused ID
+ # starts with fresh inputs rather than inheriting the deleted object's data.
+ for kind,prefix in [('rods','sf_rod_'),('pins','sf_pin_'),('blocks','sf_block_'),('loads','sf_extra_')]:
+  attached=lambda q:(q['weld']==bid or q['nut']==bid) if kind=='rods' else q['beam']==bid
+  removed=[q for q in m[kind] if attached(q)]
+  m[kind]=[q for q in m[kind] if not attached(q)]
+  prefixes.extend(prefix+q['id']+'_' for q in removed)
+ for c in m['coils']:
+  for side in ['lower','upper']:
+   if c.get(side)==bid:
+    c[side]='Auto';st.session_state.pop('sf_coil_'+c['id']+'_'+side,None)
+ for key in list(st.session_state):
+  if key.startswith(tuple(prefixes)) or key in {'sf_beam_panel_'+bid,'sf_editor_draft_'+bid}:del st.session_state[key]
+ if st.session_state.get('sf_active_beam')==bid:activate_beam(m['beams'][min(index,len(m['beams'])-1)]['id'])
+ if st.session_state.get('sf_editor_beam')==bid:
+  close_editor();st.session_state.pop('sf_editor_beam',None)
 
 def ninput(label,value,key,step=.5,minimum=None,maximum=None,format=None,help=None):
  import streamlit as st
@@ -123,6 +154,7 @@ def add_object(kind,bid=None):
  prefix={'coils':'C','rods':'T','pins':'R','blocks':'P','loads':'F'}[kind];i=next_id(m[kind],prefix)
  if kind=='coils':q=new_coil(i)
  elif kind=='rods':
+  if len(m['beams'])<2:return
   q=new_rod(i);q['weld']=m['beams'][0]['id'];q['nut']=m['beams'][-1]['id']
  elif kind=='pins':
   q=new_pin(i);q['beam']=bid or m['beams'][0]['id'];b=next(b for b in m['beams'] if b['id']==q['beam']);q['x']=b['x']+b['length']/2
@@ -139,6 +171,8 @@ def beam_editor(m,b):
  bid=b['id'];prefix='sf_beam_'+bid
  b['name']=st.text_input('Beam name',b['name'],key=prefix+'_name',on_change=activate_beam,args=(bid,))
  st.button('Inspect this beam',key=prefix+'_inspect',on_click=activate_beam,args=(bid,),width='stretch')
+ st.button('Remove layer',key=prefix+'_remove',on_click=remove_beam_layer,args=(bid,),disabled=len(m['beams'])<=1,
+  help='Removes this layer and its attached rods, lifting points, blocks and additional loads.',width='stretch')
  cols=st.columns(2)
  with cols[0]:b['x']=ninput('Start x (in)',b['x'],prefix+'_x')
  with cols[1]:b['length']=ninput('Length (in)',b['length'],prefix+'_length',minimum=.01)
@@ -214,11 +248,11 @@ def beam_editor(m,b):
 def design_panel(m):
  import streamlit as st
  st.button('Reset Design',key='sf_reset_design',on_click=reset_inputs,args=('Design',),width='stretch')
- st.number_input('How many beam layers?',min_value=2,max_value=5,value=len(m['beams']),step=1,key='sf_layer_count',on_change=layer_change)
+ st.button('＋ Add beam layer',key='sf_add_beam',on_click=add_beam_layer,width='stretch')
  st.caption('A fully welded combination counts as one layer.')
  ids=[b['id'] for b in m['beams']];names={b['id']:b['name'] for b in m['beams']}
  for i,b in enumerate(m['beams']):
-  kw={'expanded':i==0}
+  kw={'expanded':b['id']==st.session_state.get('sf_active_beam',ids[0])}
   if 'on_change' in inspect.signature(st.expander).parameters:
    kw.update(key='sf_beam_panel_'+b['id'],on_change=beam_expanded,args=(b['id'],))
   with st.expander(b['id']+' · '+b['name'],**kw):beam_editor(m,b)
@@ -236,7 +270,8 @@ def design_panel(m):
     c['upper']=choose('Upper bearing beam',['Auto','None']+ids,c.get('upper','Auto'),cp+'_upper')
    st.button('Remove coil',key=cp+'_del',on_click=delete_object,args=('coils',c['id']))
  st.divider();st.markdown('**Threaded rods**')
- st.button('＋ Add rod',key='sf_add_rod',on_click=add_object,args=('rods',),width='stretch')
+ st.button('＋ Add rod',key='sf_add_rod',on_click=add_object,args=('rods',),disabled=len(ids)<2,width='stretch')
+ if len(ids)<2:st.caption('Add another beam layer to connect a threaded rod.')
  for r in m['rods']:
   with st.expander(r['id']+' · '+r['name']):
    rp='sf_rod_'+r['id'];r['name']=st.text_input('Rod name',r['name'],key=rp+'_name')
@@ -413,7 +448,7 @@ def render_app():
  st.markdown('''<style>.block-container{max-width:1580px;padding-top:1.3rem;padding-bottom:2rem}[data-testid="stSidebar"]{min-width:380px;max-width:405px}[data-testid="stSidebar"] .block-container{padding-top:1rem}[data-testid="stSidebar"] h3{font-size:1.05rem}[data-testid="stMetricValue"]{font-size:1.45rem}div[data-testid="stTabs"] button{font-size:.88rem}@media(max-width:750px){[data-testid="stSidebar"]{min-width:0;max-width:92vw}}</style>''',unsafe_allow_html=True)
  m,bid,calculate=render_sidebar()
  st.title('Frame Load Analyzer')
- st.caption('Shipping-frame design · 2–5 beam layers · automatic coil seats · inches / lbf / psi')
+ st.caption('Shipping-frame design · add beam layers as needed · automatic coil seats · inches / lbf / psi')
  render_editor(m,bid)
  try:
   g,incomplete=preview_geometry(m)
@@ -449,12 +484,19 @@ def render_app():
  hasload=m['loading']['self_weight'] or m['loading']['coil_weight']>0 or any(q.get('value',0)!=0 for q in m.get('loads',[]))
  if not hasload:
   st.info('Design preview is live. Enter coil weight or enable self-weight in Loading to calculate results. Load an editable example for a worked case.')
-  tabs=st.tabs(['Bending moment','Shear force','Deflection','Stress','Forces','Calculations'])
+  tabs=result_tabs()
   for tab in tabs:
    with tab:st.write('Results will appear here after a nonzero load is entered.')
   return
+ if st.session_state.get('sf_solution_digest')!=digest and not calculate:
+  st.info('Inputs are ready. Press Calculate results to update the analysis. The schematic remains live while you edit.')
+  calculate=st.button('Calculate results',key='sf_main_calculate',type='primary')
+  if not calculate:
+   for tab in result_tabs():
+    with tab:st.caption('Calculate results for the current inputs to display this view.')
+   return
  try:
-  if st.session_state.get('sf_solution_digest')!=digest or calculate:
+  if calculate:
    with st.spinner('Updating cut sections, contacts and beam response…'):
     s=solve_frame(m)
    st.session_state.sf_solution=s;st.session_state.sf_solution_digest=digest
@@ -474,9 +516,10 @@ def render_app():
  st.dataframe(pd.DataFrame([{'Beam':bid,'Name':r['beam']['name'],'Peak nominal stress (psi)':r['peak_stress']['stress'],'At x (in)':r['peak_stress']['x'],'Peak |moment| (lbf·in)':abs(r['peak_moment']['M']),'Max |movement| (in)':abs(r['peak_deflection']['v'])} for bid,r in s.beam_results.items()]),hide_index=True,width='stretch')
  if m['loading'].get('allowable_beam',0)>0:
   a=m['loading']['allowable_beam'];st.info(f'Peak nominal bending stress / entered allowable = {peak["stress"]/a:.3f}. This comparison covers nominal bending only.')
- tabs=st.tabs(['Bending moment','Shear force','Deflection','Stress','Forces','Calculations'])
+ tabs=result_tabs()
  ids=['All beams']+list(s.beam_results)
  for tab,quant in zip(tabs[:4],['M','V','v','stress']):
+  if not tab_is_open(tab):continue
   with tab:
    view=st.selectbox('Show beam',ids,key='sf_result_beam_'+quant)
    q=quant
@@ -486,15 +529,17 @@ def render_app():
    all_labels=st.checkbox('Label all detected extrema',value=False,key='sf_labels_'+quant)
    st.plotly_chart(make_chart(s,q,view,all_labels),width='stretch',key='sf_plot_'+quant,config={'displaylogo':False,'scrollZoom':True,'toImageButtonOptions':{'format':'png','filename':'frame_'+quant,'scale':2}})
    st.caption('Labels identify critical values; hover for other positions. Duplicate x values preserve either side of a force or section change.')
- with tabs[4]:render_forces(s)
- with tabs[5]:
-  render_calculations(s)
-  if st.button('Check mesh with finer divisions',key='sf_mesh_check'):
-   try:
-    with st.spinner('Checking refinement…'):st.session_state.sf_mesh_result=(digest,mesh_check(s))
-   except ModelError as e:st.error(str(e))
-  mesh=st.session_state.get('sf_mesh_result')
-  if mesh and mesh[0]==digest:st.dataframe(pd.DataFrame(mesh[1]),hide_index=True,width='stretch')
+ if tab_is_open(tabs[4]):
+  with tabs[4]:render_forces(s)
+ if tab_is_open(tabs[5]):
+  with tabs[5]:
+   render_calculations(s)
+   if st.button('Check mesh with finer divisions',key='sf_mesh_check'):
+    try:
+     with st.spinner('Checking refinement…'):st.session_state.sf_mesh_result=(digest,mesh_check(s))
+    except ModelError as e:st.error(str(e))
+   mesh=st.session_state.get('sf_mesh_result')
+   if mesh and mesh[0]==digest:st.dataframe(pd.DataFrame(mesh[1]),hide_index=True,width='stretch')
  st.divider();c1,c2,c3=st.columns(3)
  with c1:st.download_button('Download chart data CSV',chart_csv(s),'shipping_frame_chart_data.csv','text/csv',key='sf_chart_csv',width='stretch')
  with c2:st.download_button('Download forces CSV',force_csv(s),'shipping_frame_forces.csv','text/csv',key='sf_forces_csv',width='stretch')

@@ -141,7 +141,7 @@ def load_model(text):
   if not isinstance(m.get(name),list):raise ModelError('Missing/invalid '+name+' list.')
   if any(not isinstance(q,dict) or not isinstance(q.get('id'),str) for q in m[name]):raise ModelError('Every '+name+' object needs a text ID.')
   if len({q['id'] for q in m[name]})!=len(m[name]):raise ModelError('IDs must be unique within '+name+'.')
- if not 2<=len(m['beams'])<=5:raise ModelError('A frame must have 2–5 beam layers.')
+ if not m['beams']:raise ModelError('A frame must have at least one beam layer.')
  # Reject unreasonable payloads before performing any geometry/FE work.
  if any(len(m[k])>300 for k in ['coils','rods','blocks','loads']) or len(m['pins'])>20:raise ModelError('Too many objects in this model.')
  def finite(obj):
