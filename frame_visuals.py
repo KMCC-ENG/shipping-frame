@@ -243,6 +243,7 @@ def rod_fbd(rod):
 def make_chart(solution,quantity,beam='All beams',all_labels=False):
  import plotly.graph_objects as go
  quantities={'M':('Bending moment','lbf·in'),'V':('Shear force','lbf'),'v':('Vertical deflection','in'),
+             'lateral_M':('Lateral bending moment','lbf·in'),'lateral_V':('Lateral shear force','lbf'),'w':('Lateral deflection','in'),
              'stress':('Nominal bending stress magnitude','psi'),'stress_top':('Top surface stress','psi'),'stress_bottom':('Bottom surface stress','psi')}
  title,unit=quantities[quantity];fig=go.Figure()
  for j,(bid,r) in enumerate(solution.beam_results.items()):
@@ -255,13 +256,15 @@ def make_chart(solution,quantity,beam='All beams',all_labels=False):
    crit=sorted(crit,key=lambda p:abs(p[quantity]),reverse=True)[:6]
   for p in crit:
    if abs(p[quantity])<1e-8:continue
-   fig.add_annotation(x=p['x'],y=p[quantity],text=num(p[quantity],5 if quantity=='v' else 2),showarrow=True,arrowhead=0,ax=0,ay=-24 if p[quantity]>=0 else 24,font=dict(color=col,size=10))
+   fig.add_annotation(x=p['x'],y=p[quantity],text=num(p[quantity],5 if quantity in ['v','w'] else 2),showarrow=True,arrowhead=0,ax=0,ay=-24 if p[quantity]>=0 else 24,font=dict(color=col,size=10))
  fig.update_layout(template='plotly_white',height=440,margin=dict(l=45,r=25,t=25,b=55),xaxis_title='x from common datum (in)',yaxis_title=f'{title} ({unit})',
   legend=dict(orientation='h',y=1.13),hovermode='closest',font=dict(family='Arial',color=NAVY),xaxis=dict(showgrid=True,gridcolor='#edf1f5'),yaxis=dict(zeroline=True,zerolinecolor='#aebdcb',gridcolor='#edf1f5'))
  return fig
 
 def chart_csv(solution):
  f=io.StringIO();cols=['beam','x','side','V','M','v','theta','stress_top','stress_bottom','stress','A','I','yc','ctop','cbottom','element_start','element_end']
+ if solution.model['analysis'].get('coupled_bending'):
+  cols+=['lateral_V','lateral_M','w','psi','Iyy','Izy','stress_min','stress_max','critical_y','critical_z']
  w=csv.DictWriter(f,fieldnames=cols);w.writeheader()
  for bid,r in solution.beam_results.items():
   for p in r['samples']:w.writerow({'beam':bid,**{k:p[k] for k in cols if k!='beam'}})
@@ -269,8 +272,12 @@ def chart_csv(solution):
 
 def force_csv(solution):
  f=io.StringIO();cols=['kind','label','x','force_lbf','gap_in','beam','weld','nut','lower','upper']
+ if solution.model['analysis'].get('coupled_bending'):cols.append('moment_lbf_in')
  w=csv.DictWriter(f,fieldnames=cols);w.writeheader()
  for p in solution.forces:
   w.writerow({'kind':p['kind'],'label':p['label'],'x':p['x'],'force_lbf':p['force'],'gap_in':p['gap'],**{k:p.get(k,'') for k in cols[5:]}})
  for p in solution.reactions:w.writerow({'kind':'lifting_reaction','label':p['id'],'x':p['x'],'force_lbf':p['force'],'beam':p['beam']})
+ for p in solution.lateral_reactions:
+  field='force_lbf' if p['component']=='w' else 'moment_lbf_in'
+  w.writerow({'kind':'lateral_force' if p['component']=='w' else 'lateral_moment','label':p['id'],'x':p['x'],field:p['reaction'],'beam':p['beam']})
  return f.getvalue()

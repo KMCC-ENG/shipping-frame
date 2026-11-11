@@ -1,6 +1,6 @@
 # Frame Load Analyzer
 
-A separate Python/Streamlit app for the nominal bending response of shipping frames, with **beam layers added individually**. Units are **inches, lbf and psi**. The layout follows the earlier tube stress and centre-of-gravity apps, with independent source files and state keys so the apps can be combined later.
+A separate Python/Streamlit app for the nominal elastic bending response of shipping frames, with **beam layers added individually**. Units are **inches, lbf and psi**. The layout follows the earlier tube stress and centre-of-gravity apps, with independent source files and state keys so the apps can be combined later.
 
 ## Start the app
 
@@ -26,9 +26,9 @@ For Streamlit Community Cloud, upload **all Python files, `requirements.txt`, th
 7. In **Loading**, enter the total coil-package weight and how it is shared between longitudinal shipping frames. Enter relative coil weight shares if the coils have different weights. Beam/block/rod self-weight can be included automatically.
 8. Review **Material**, then inspect the result tabs. The default load multiplier is 1.0 for static gravity; any project lifting multiplier must be supplied by the user.
 
-The default design has **2 beams and no coils, rods, lifting points, blocks or additional loads**. Examples are added only when you choose to load one. The schematic and remaining-section view update while you edit. Press **Calculate results** (or the sidebar's **Calculate / refresh results**) to run the full analysis. After a design, loading or material change, the old results are hidden until you calculate again. Switching views and changing the inspection station reuse the current solution.
+The default design has **0 beams, coils, rods, lifting points, blocks or additional loads**. New beam, coil and rod geometry fields start blank. Select the section, enter its dimensions and positions, and choose the rod attachments before calculating. Zero is a valid coordinate. Draft JSON files can retain blank inputs for later completion. Examples are added only when you choose to load one. The schematic and remaining-section view update while you edit. Press **Calculate results** (or the sidebar's **Calculate / refresh results**) to run the full analysis. After a design, loading or material change, the old results are hidden until you calculate again. Switching views and changing the inspection station reuse the current solution.
 
-Each beam row has a **Remove layer** button. Removing a layer also removes rods connected to it, its lifting points, blocks and additional loads. Coil bearing selections referencing it return to Auto; the coils and other layers are retained. At least one layer remains. A newly added layer opens for editing and becomes the inspected beam. Saved models can contain more than five layers.
+Each beam row has a **Remove layer** button. Removing a layer also removes rods connected to it, its lifting points, blocks and additional loads. Coil bearing selections referencing it return to Auto; the coils and other layers are retained. Every layer can be removed to return to an empty design. A newly added layer opens for editing and becomes the inspected beam. Saved models can contain more than five layers.
 
 Identical immutable material sections share a bounded property cache, including their shear properties. This avoids repeating polygon integrations at every station when the section is unchanged. Exact geometry is the cache key; section properties and the mechanical equations are unchanged. On Streamlit versions with stateful tabs, only the selected result tab is rendered, so hidden graphs and calculation worksheets do not add work to each refresh.
 
@@ -36,7 +36,7 @@ A colored dashed line on the frame marks the selected section's **X position**. 
 
 Inch-based dimension buttons change values by **0.5 in**. You can type exact decimal values, including smaller fractions such as 0.375 in. Counts, angles, material properties and loads retain their own unit-appropriate steps.
 
-**Reset Design**, **Reset Loading** and **Reset Material** affect only their own tab. Design reset restores two beams and removes the designed coils/rods/holes/blocks, while retaining loading and materials. Loading reset clears additional loads, restores loading/analysis defaults and resets coil weight shares, while retaining geometry/materials. Material reset restores the default steels. If retained loads reference beams removed by a design reset, reassign those loads in Loading; they are not silently moved to another beam.
+**Reset Design**, **Reset Loading** and **Reset Material** affect only their own tab. Design reset restores an empty design and removes the designed coils/rods/holes/blocks, while retaining loading and materials. Loading reset clears additional loads, restores loading defaults and resets coil weight shares, while retaining geometry/materials. Material reset restores the default steels and clears optional stress allowables. Analysis reset restores analysis settings and clears lateral constraints. If retained loads reference beams removed by a design reset, reassign those loads in Loading; they are not silently moved to another beam.
 
 ## Cross sections and section drawing
 
@@ -62,6 +62,22 @@ Curves are polygonized using the selected circle resolution. A closed outline is
 
 Default frame steel is **CSA G40.21 44W** (E 29,000,000 psi, nu 0.30, weight density 0.2836 lbf/in³, Fy 44,000 psi, Fu 64,000 psi). Default rods are **ASTM A193 B7** (same E/nu/density, Fy 105,000 psi, Fu 125,000 psi through 2.5 in diameter). All values are editable. The 44W default yield applies through 2.5 in thickness. Supplied B7 strength does not establish the strength of its welded attachment or heat-affected region.
 
+## Analysis settings and lateral bending
+
+Analysis settings have their own **Analysis** input tab. **Optional nominal-stress comparison** is in **Material**. **Additional beam loads** is displayed directly in **Loading**. The load-multiplier guide explains its effect on coil loads, additional loads and enabled self-weight.
+
+**Include coupled vertical and lateral bending** is off for the original planar model and older saved designs. Checking it shows **Free to bend sideways**. With that second checkbox checked, both bending directions use the full centroidal inertia matrix, including Iyz. Unloaded lateral rigid-body movement is removed using zero-reaction reference conditions. Lateral deflections are reported relative to each member's end-to-end reference chord.
+
+Uncheck **Free to bend sideways** to enter lateral constraints. Each constraint specifies a beam, frame X coordinate and a fixed-zero lateral displacement, lateral bending rotation, or both. At least one completed constraint is required in this mode. The lateral rotation is the slope of lateral bending. A constraint at one station can remove only a rigid-body mode, so the actual number and positions of physical restraints affect the bending response.
+
+Bearing contacts and rods retain their vertical force path in both modes. The coupled model adds bending about both section axes. Eccentric-load torsion and lateral-torsional buckling require additional assessment. Shear deformation uses independent directional energy-area approximations. The selected model is shown with the results. The moment, shear and deflection tabs provide vertical/lateral direction controls when coupled bending is enabled.
+
+Coupled analysis of **Custom properties** requires Iyy, Iyz, centroid-to-left/right distances and lateral shear area when shear deformation is enabled. The calculated stress uses the bounding rectangle defined by the fiber distances. Use a drawn geometric section for exact material-fiber peaks.
+
+Geometry connectivity is checked with shear deformation on or off. Unsupported disconnected regions must be represented as separate members or a section containing their physical shear connection. Direct member bearing checks actual facing surfaces, including nested sections. Contact is discretized along the beam, so compare successively finer meshes for every new layout. Compare stress, vertical/lateral movement, rod forces and contact forces until they stabilize. Circle resolution controls a separate geometry approximation.
+
+At startup, the app displays the agreed disclaimer and requires **OK** before the inputs become available. The acknowledgement lasts for the browser session. Importing a model preserves its entered values across subsequent edits.
+
 ## Results and calculation worksheet
 
 The result tabs are **Bending moment, Shear force, Deflection, Stress, Forces and Calculations**. Graphs can show one beam or all beams, with critical labels and hover values. Stress can show the magnitude envelope or signed top/bottom values. Duplicate longitudinal positions in CSV data retain either side of point loads and section changes.
@@ -74,7 +90,7 @@ Save a design as JSON and reopen it later. Chart and force data are downloadable
 
 ## Mechanical model and limits
 
-The solver uses small-deflection, linearly elastic, variable-section planar beam elements, with optional shear deformation. Section area, centroid, inertia, shear area and self-weight vary through coil cutouts, blocks and partial-length welded components. Coils are rigid vertical spacers. Coil/beam and beam/beam bearing is frictionless and compression-only; rods can go slack. Bearing faces must overlap in section depth.
+The solver uses small-deflection, linearly elastic, variable-section beam elements, with optional shear deformation and optional coupled vertical/lateral bending. Section area, centroid, inertia, shear area and self-weight vary through coil cutouts, blocks and partial-length welded components. Coils are rigid vertical spacers. Coil/beam and beam/beam bearing is frictionless and compression-only; rods can go slack. Bearing faces must overlap in section depth.
 
 OSQP supplies an initial contact set. A working-set refinement solves the coupled equilibrium/compatibility equations. The app independently checks gaps, compression multipliers, rod force/extension compatibility, stabilization forces and external force/moment balance before accepting a result. Contact itself uses inequality constraints, not a guessed penalty stiffness. Tiny numerical stabilization is rejected if it provides a material support force.
 

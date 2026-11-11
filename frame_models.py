@@ -13,12 +13,16 @@ SECTION_TYPES=['Angle','C-channel','HSS','Angle + angle','Angle + C-channel','An
 def component(shape='Angle',h=3.,w=3.,t=.375,**kw):
  return dict(shape=shape,h=h,w=w,t=t,dy=0.,dz=0.,start=0.,**kw)
 
-def new_beam(index=1):
- return {'id':f'B{index}','name':f'Beam {index}','x':0.,'y':(index-1)*5.,'length':48.,
+def new_beam(index=1,blank=False):
+ b={'id':f'B{index}','name':f'Beam {index}','x':0.,'y':(index-1)*5.,'length':48.,
   'section_type':'Angle','auto_cut':True,'components':[component()],
   'manual':{'A':2.,'I':1.5,'ctop':2.,'cbottom':1.,'width':3.,'As':1.}}
+ if blank:
+  b.update(x=None,y=None,length=None,section_type=None,components=[])
+  b['manual']={key:None for key in ['A','I','ctop','cbottom','width','As','Iyy','Izy','cleft','cright','Asz']}
+ return b
 
-def set_section_type(b,typ):
+def set_section_type(b,typ,blank=False):
  """Initialize a new section choice. Existing choices are retained by UI archives."""
  b['section_type']=typ
  base=component(typ) if typ in ['Angle','C-channel','HSS'] else component()
@@ -34,11 +38,26 @@ def set_section_type(b,typ):
   b['components']=[component('Custom draw',drawing=[])]
  elif typ=='Custom properties':b['auto_cut']=False
  else:b['components']=[base]
+ if blank:
+  for i,c in enumerate(b['components']):
+   for key in ['h','w','t']:c[key]=None
+   if c['shape']!='Custom draw':c['rotation']=None
+   if i:c.update(dy=None,dz=None)
+  if typ=='Section + flat bar':
+   b['components'][0]['shape']=None
+   b['bar_placement']=None
  return b
 
-def new_coil(index=1):return {'id':f'C{index}','name':f'Coil {index}','x':8.,'y':3.,'r':1.75,'share':1.,'lower':'Auto','upper':'Auto'}
-def new_rod(index=1):return {'id':f'T{index}','name':f'Rod {index}','x':2.5,'diameter':.75,'tpi':10.,'weld':'B1','nut':'B2',
-                           'free_length':5.,'auto_length':True,'weld_y':None,'nut_y':None}
+def new_coil(index=1,blank=False):
+ return {'id':f'C{index}','name':f'Coil {index}',
+         'x':None if blank else 8.,'y':None if blank else 3.,'r':None if blank else 1.75,
+         'share':1.,'lower':'Auto','upper':'Auto'}
+
+def new_rod(index=1,blank=False):
+ return {'id':f'T{index}','name':f'Rod {index}',
+         'x':None if blank else 2.5,'diameter':None if blank else .75,'tpi':None if blank else 10.,
+         'weld':None if blank else 'B1','nut':None if blank else 'B2',
+         'free_length':None if blank else 5.,'auto_length':True,'weld_y':None,'nut_y':None}
 def new_pin(index=1):return {'id':f'R{index}','name':f'Lift {index}','beam':'B1','x':1.5,'diameter':.75,'y':None}
 def new_block(index=1):return {'id':f'P{index}','name':f'Block {index}','beam':'B2','x':16.,'y':3.,'length':2.,'height':1.,'depth':2.,'z':1.}
 def next_id(items,prefix):
@@ -51,12 +70,12 @@ def base_model():
   'materials':{'frame':copy.deepcopy(PRESETS['CSA G40.21 44W']),'rod':copy.deepcopy(PRESETS['ASTM A193 B7'])},
   'loading':{'coil_weight':0.,'frames':2,'equal_frames':True,'frame_share':.5,'self_weight':False,'factor':1.,'equal_reactions':False,
              'allowable_beam':0.,'allowable_rod':0.},
-  'analysis':{'elements':72,'timoshenko':True,'curve_resolution':128,'regularization':1e-6}}
+  'analysis':{'elements':72,'timoshenko':True,'curve_resolution':128,'regularization':1e-6,
+              'coupled_bending':False,'free_lateral':True,'lateral_constraints':[]}}
 
 def default_model():
- """A new design has two members and no example coils, rods or lifting holes."""
- m=base_model();m['beams']=[new_beam(1),new_beam(2)]
- return m
+ """A new design starts empty; UI constructors provide explicit blank inputs."""
+ return base_model()
 
 def reset_tab(model,tab):
  """Reset the inputs owned by one tab; retain the other tabs' inputs."""
@@ -64,9 +83,14 @@ def reset_tab(model,tab):
  if tab=='Design':
   for key in ['beams','coils','rods','pins','blocks']:model[key]=defaults[key]
  elif tab=='Loading':
-  for key in ['loading','analysis','loads']:model[key]=defaults[key]
+  allowables={key:model['loading'].get(key,0.) for key in ['allowable_beam','allowable_rod']}
+  for key in ['loading','loads']:model[key]=defaults[key]
+  model['loading'].update(allowables)
   for coil in model['coils']:coil['share']=1.
- elif tab=='Material':model['materials']=defaults['materials']
+ elif tab=='Material':
+  model['materials']=defaults['materials']
+  for key in ['allowable_beam','allowable_rod']:model['loading'][key]=defaults['loading'][key]
+ elif tab=='Analysis':model['analysis']=defaults['analysis']
  else:raise ValueError('Unknown input tab: '+str(tab))
  return model
 
@@ -141,7 +165,6 @@ def load_model(text):
   if not isinstance(m.get(name),list):raise ModelError('Missing/invalid '+name+' list.')
   if any(not isinstance(q,dict) or not isinstance(q.get('id'),str) for q in m[name]):raise ModelError('Every '+name+' object needs a text ID.')
   if len({q['id'] for q in m[name]})!=len(m[name]):raise ModelError('IDs must be unique within '+name+'.')
- if not m['beams']:raise ModelError('A frame must have at least one beam layer.')
  # Reject unreasonable payloads before performing any geometry/FE work.
  if any(len(m[k])>300 for k in ['coils','rods','blocks','loads']) or len(m['pins'])>20:raise ModelError('Too many objects in this model.')
  def finite(obj):
@@ -154,3 +177,43 @@ def load_model(text):
   for c in b.get('components',[]):
    if len(c.get('drawing',[]))>300:raise ModelError('A custom section is limited to 300 shapes.')
  return m
+
+
+def incomplete_inputs(model,geometry_only=False):
+ """Report missing entries while retaining None as distinct from a valid zero."""
+ errors=[]
+ def require(obj,keys,label):
+  missing=[key for key in keys if obj.get(key) is None]
+  if missing:errors.append(label+' — enter '+', '.join(missing)+'.')
+ if not model['beams']:errors.append('Add at least one beam layer.')
+ if not geometry_only:
+  for name,material in model['materials'].items():require(material,['E','nu','density','Fy','Fu'],name+' material')
+  require(model['loading'],['coil_weight','frames','factor'], 'Loading')
+  if not model['loading'].get('equal_frames',True):require(model['loading'],['frame_share'],'Frame weight share')
+ analysis=model.get('analysis',{})
+ coupled=analysis.get('coupled_bending',False)
+ for b in model['beams']:
+  require(b,['x','y','length','section_type'],b['name'])
+  if b.get('section_type')=='Custom properties':
+   keys=['A','I','ctop','cbottom','width','As']
+   if coupled:keys+=['Iyy','Izy','cleft','cright']+(['Asz'] if analysis.get('timoshenko',True) else [])
+   require(b['manual'],keys,b['name']+' section properties')
+  for i,c in enumerate(b.get('components',[]),1):
+   if c['shape']=='Custom draw':
+    if not c.get('drawing'):errors.append(b['name']+' — draw a closed section.')
+   else:require(c,['shape','h','w']+([] if c['shape']=='Flat bar' else ['t'])+(['rotation'] if 'rotation' in c else []),b['name']+f' component {i}')
+   require(c,['dy','dz'],b['name']+f' component {i} offsets')
+   if 'length' in c:require(c,['start','length'],b['name']+f' component {i} extent')
+  if b.get('section_type')=='Section + flat bar' and 'bar_placement' in b:require(b,['bar_placement'],b['name'])
+ for key,fields in [('coils',['x','y','r']),('rods',['x','diameter','tpi','weld','nut']),
+                    ('pins',['x','diameter','beam']),('blocks',['x','y','z','height','depth','length','beam'])]:
+  for obj in model[key]:require(obj,fields,obj.get('name',obj['id']))
+ for r in model['rods']:
+  if not r.get('auto_length',True):require(r,['free_length'],r['name'])
+  if r.get('manual_seats',False):require(r,['weld_y','nut_y'],r['name']+' attachment seats')
+ for q in model.get('loads',[]):require(q,['beam','kind','x','value']+(['end'] if q.get('kind')=='Uniform' else []),q['name'])
+ if coupled and not analysis.get('free_lateral',True):
+  constraints=analysis.get('lateral_constraints',[])
+  if not constraints:errors.append('Add a lateral constraint or select Free to bend sideways.')
+  for q in constraints:require(q,['beam','x','kind'],q['id']+' lateral constraint')
+ return errors

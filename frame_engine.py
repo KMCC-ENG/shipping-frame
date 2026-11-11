@@ -1,12 +1,12 @@
-"""Variable-section planar beam/contact analysis, inches / lbf / psi.
+"""Variable-section beam/contact analysis, inches / lbf / psi.
 
-Vertical v and section rotation theta only. Coils are rigid vertical spacers.
+Planar bending or coupled vertical/lateral elastic bending. Coils are rigid vertical spacers.
 Coil/member and member/member contacts carry compression; rods are finite-EA/L,
 zero-preload, tension-only links. Small deflections; no chain-angle or tilt solve.
 The formulation returns nominal beam stresses, not notch/weld/lug local peaks.
 """
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass,field
 import copy,json,math,warnings
 import numpy as np
 from scipy import sparse
@@ -14,6 +14,7 @@ from scipy.sparse.linalg import spsolve, MatrixRankWarning
 from scipy.optimize import minimize_scalar, brentq
 from shapely.geometry import Point,box,GeometryCollection
 from frame_geometry import Geometry,ModelError,polygons,vertical_bearing_gap
+from frame_models import incomplete_inputs
 
 GROOT,GWEIGHT=np.polynomial.legendre.leggauss(4)
 
@@ -40,6 +41,43 @@ def element_flexibility(L,E,G,points,As_enabled=True,q=0.):
     rq=T@p0+np.array([0,0,-q*L,q*L*L/2])
     return K,-rq,J,H
 
+
+def bending_compliance(section,E):
+    inertia=np.array([[section.I,section.Izy],[section.Izy,section.Iyy]],float)
+    return np.linalg.inv(inertia)/E
+
+
+def coupled_element_flexibility(L,E,G,points,shear=True,q=0.):
+    """Force-based two-plane beam with the full centroidal inertia tensor.
+
+    Nodal order is v, theta, w, psi. The lateral moment is work-conjugate
+    to positive lateral slope, so curvature and stress use the same tensor.
+    Shear uses independent directional energy-area approximations.
+    """
+    J=np.zeros((4,2,2));H=np.zeros((2,2,2))
+    for weight,x,section in points:
+        compliance=bending_compliance(section,E)
+        for n in range(4):J[n]+=weight*x**n*compliance
+        if shear:
+            for n in range(2):H[n]+=weight*x**n*np.diag([1/(G*section.As),1/(G*section.Asz)])
+    C=np.zeros((4,4));D=np.zeros((4,8));T=np.zeros((8,4))
+    indices=[[0,1,4,5],[2,3,6,7]]
+    d=np.array([[0,-1,0,1],[-1,-L,1,0]],float)
+    t=np.array([[1,0],[0,1],[-1,0],[L,-1]],float)
+    for i in range(2):
+        D[np.ix_([2*i,2*i+1],indices[i])]=d
+        T[np.ix_(indices[i],[2*i,2*i+1])]=t
+        for j in range(2):
+            C[2*i:2*i+2,2*j:2*j+2]=[
+                [J[1,i,j],-J[0,i,j]],
+                [L*J[1,i,j]-J[2,i,j]-H[0,i,j],-L*J[0,i,j]+J[1,i,j]]]
+    K=T@np.linalg.solve(C,D);K=(K+K.T)/2
+    e0=np.array([q*J[2,0,0]/2,q*(L*J[2,0,0]-J[3,0,0])/2-q*H[1,0,0],
+                 q*J[2,1,0]/2,q*(L*J[2,1,0]-J[3,1,0])/2-q*H[1,1,0]])
+    rq=T@np.linalg.solve(C,-e0)
+    rq[4]-=q*L;rq[5]+=q*L*L/2
+    return K,-rq,J,H
+
 @dataclass
 class Element:
     beam: str
@@ -50,6 +88,7 @@ class Element:
     f: np.ndarray
     q: float
     points: list
+    coupled: bool=False
     @property
     def L(self):return self.x1-self.x0
 
@@ -73,9 +112,12 @@ class Solution:
     B: object
     f: np.ndarray
     warnings: list
+    lateral_reactions: list=field(default_factory=list)
 
 
 def validate_model(model,geometry=None):
+    missing=incomplete_inputs(model)
+    if missing:raise ModelError('Complete the required inputs. '+ ' '.join(missing[:8]))
     g=geometry or Geometry(model);bs=g.beams;ids=list(bs)
     if not bs:raise ModelError('Add at least one beam layer.')
     if len(bs)!=len(model['beams']):raise ModelError('Beam IDs must be unique.')
@@ -136,6 +178,25 @@ def validate_model(model,geometry=None):
         if q['beam'] not in bs:raise ModelError('An additional load refers to a removed beam.')
         b=bs[q['beam']];end=q.get('end',q['x']) if q['kind']=='Uniform' else q['x']
         if q['x']<b['x']-1e-8 or end>b['x']+b['length']+1e-8 or (q['kind']=='Uniform' and end<=q['x']):raise ModelError('An additional load lies outside its beam or has an invalid interval.')
+    analysis=model['analysis']
+    if analysis.get('coupled_bending'):
+        for b in bs.values():
+            if b.get('section_type')=='Custom properties':
+                p=b['manual']
+                if min(p['Iyy'],p['cleft'],p['cright'])<=0 or (analysis['timoshenko'] and p['Asz']<=0):
+                    raise ModelError(b['name']+': lateral inertia, fiber distances and shear area must be positive.')
+        if not analysis.get('free_lateral',True):
+            seen=set()
+            for q in analysis.get('lateral_constraints',[]):
+                if q['beam'] not in bs:raise ModelError('A lateral constraint refers to a removed beam.')
+                b=bs[q['beam']]
+                if not b['x']<=q['x']<=b['x']+b['length']:raise ModelError('A lateral constraint lies outside its beam.')
+                if q['kind'] not in ['Displacement','Rotation','Displacement and rotation']:raise ModelError('Choose a lateral constraint type.')
+                components=['w','psi'] if q['kind']=='Displacement and rotation' else ['w'] if q['kind']=='Displacement' else ['psi']
+                for component in components:
+                    key=(q['beam'],round(q['x'],9),component)
+                    if key in seen:raise ModelError('Duplicate lateral restraints are not allowed.')
+                    seen.add(key)
     return g
 
 
@@ -150,9 +211,10 @@ def rod_geometry(r,g):
 
 
 def assemble(model,elements_per_span=None):
-    g=Geometry(model);validate_model(model,g)
+    g=validate_model(model)
     mat=model['materials']['frame'];E=mat['E'];G=E/(2*(1+mat['nu']));analysis=model['analysis']
     count=int(elements_per_span or analysis.get('elements',72))
+    coupled=bool(analysis.get('coupled_bending',False));ndpn=4 if coupled else 2
     if count<8 or count>400:raise ModelError('Use 8–400 mesh divisions per longest beam.')
     xmin=min(b['x'] for b in model['beams']);xmax=max(b['x']+b['length'] for b in model['beams']);span=xmax-xmin
     step=span/count
@@ -163,7 +225,7 @@ def assemble(model,elements_per_span=None):
         xs=allx[(allx>=b['x']-1e-8)&(allx<=b['x']+b['length']+1e-8)]
         # Collapse near-coincident circle/mesh coordinates.
         xs=np.array([x for i,x in enumerate(xs) if i==0 or x-xs[i-1]>max(span*1e-8,1e-7)])
-        ids=np.arange(n,n+2*len(xs)).reshape(-1,2);n+=2*len(xs)
+        ids=np.arange(n,n+ndpn*len(xs)).reshape(-1,ndpn);n+=ndpn*len(xs)
         nodes[b['id']]={'x':xs,'dofs':ids}
     coil_dofs={c['id']:n+i for i,c in enumerate(model['coils'])};n+=len(coil_dofs)
     K=sparse.lil_matrix((n,n));f=np.zeros(n);elems=[];weightitems=[];external=[]
@@ -178,7 +240,7 @@ def assemble(model,elements_per_span=None):
             L=xb-xa;pp=[];area_int=0.
             for t,w in zip(GROOT,GWEIGHT):
                 xx=(xa+xb)/2+t*L/2
-                try:s=g.props(b['id'],xx,shear=analysis['timoshenko'])
+                try:s=g.props(b['id'],xx,shear=analysis['timoshenko'],coupled=coupled)
                 except ModelError as exc:raise ModelError(f"{b['name']} at x={xx:.4f}: {exc}") from exc
                 pp.append((w*L/2,xx-xa,s));area_int+=w*L/2*s.A
             # Also validate actual minimum sections at both ends, not only quadrature points.
@@ -188,12 +250,13 @@ def assemble(model,elements_per_span=None):
             for load in model.get('loads',[]):
                 if load['beam']==b['id'] and load['kind']=='Uniform' and xa>=load['x']-1e-8 and xb<=load['end']+1e-8:
                     q+=load['value']/(load['end']-load['x'])*factor
-            ke,fe,J,H=element_flexibility(L,E,G,pp,analysis['timoshenko'],q)
+            formulation=coupled_element_flexibility if coupled else element_flexibility
+            ke,fe,J,H=formulation(L,E,G,pp,analysis['timoshenko'],q)
             ids=nb['dofs'][i:i+2].flatten()
             for j,a in enumerate(ids):
                 f[a]+=fe[j]
                 for k,bb in enumerate(ids):K[a,bb]+=ke[j,k]
-            elems.append(Element(b['id'],float(xa),float(xb),ids,ke,fe,float(q),pp))
+            elems.append(Element(b['id'],float(xa),float(xb),ids,ke,fe,float(q),pp,coupled))
         weightitems.append({'member':b['id'],'name':b['name'],'weight':W,'x':Wx/W if W else (b['x']+b['length']/2),'included':sw})
     for load in model.get('loads',[]):
         if load['kind']=='Point':
@@ -220,8 +283,15 @@ def assemble(model,elements_per_span=None):
             if rod_rect.intersection(Point(c['x'],c['y']).buffer(c['r'],quad_segs=64)).area>1e-6:
                 raise ModelError(r['name']+' intersects '+c['name']+'. Move the rod or coil.')
     rows=[];meta=[];ks=[];gaps=[]
+    ordered_pins=sorted(model['pins'],key=lambda p:p['x'])
+    reference_pins=[ordered_pins[0],ordered_pins[-1]] if model['loading']['equal_reactions'] else ordered_pins
+    fixed_vertical={vd(p['beam'],p['x']) for p in reference_pins}
     ck=0. # Bearing is an exact inequality in the QP, not a penalty spring.
     def add(terms,kind,label,x,gap0,k,**kw):
+        # Two prescribed zero elevations already satisfy this contact. Its
+        # zero force removes a redundant constraint and fixes the otherwise
+        # indeterminate sharing of coincident support reactions.
+        if kind=='beam_contact' and all(dof in fixed_vertical for dof,value in terms):return
         rows.append(terms);ks.append(k);gaps.append(gap0)
         meta.append({'kind':kind,'label':label,'x':float(x),'initial_gap':float(gap0),'k':float(k),**kw})
     # Coil contacts: choose the closest actual remaining surface on each side.
@@ -258,29 +328,25 @@ def assemble(model,elements_per_span=None):
             common=np.intersect1d(nodes[a['id']]['x'],nodes[b['id']]['x'])
             if len(common)<2:continue
             for ix,x in enumerate(common):
-                pa=g.props(a['id'],x);pb=g.props(b['id'],x)
-                if a.get('section_type')!='Custom properties' and b.get('section_type')!='Custom properties':
-                    ga=g.section(a['id'],x);gb=g.section(b['id'],x)
-                    if ga.intersection(gb).area>1e-7:raise ModelError(a['name']+' overlaps '+b['name']+f' at x={x:g}. Combine welded pieces into one layer or adjust offsets.')
-                if pa.ymax<=pb.ymin+1e-7:low,up,gg=a['id'],b['id'],pb.ymin-pa.ymax
-                elif pb.ymax<=pa.ymin+1e-7:low,up,gg=b['id'],a['id'],pa.ymin-pb.ymax
-                else:continue
-                if a.get('section_type')!='Custom properties' and b.get('section_type')!='Custom properties':
-                    gg=vertical_bearing_gap(g.section(low,x),g.section(up,x))
-                    if gg is None:continue
-                tributary=((common[ix+1]-x) if ix==0 else (x-common[ix-1]) if ix==len(common)-1 else (common[ix+1]-common[ix-1]))/2
-                add([(vd(up,x),1.),(vd(low,x),-1.)],'beam_contact',low+'/'+up,x,max(0.,gg),ck/span*tributary,lower=low,upper=up)
+                ga=box(*g.bounds(a['id'],x)) if a.get('section_type')=='Custom properties' else g.section(a['id'],x)
+                gb=box(*g.bounds(b['id'],x)) if b.get('section_type')=='Custom properties' else g.section(b['id'],x)
+                if ga.intersection(gb).area>1e-7:raise ModelError(a['name']+' overlaps '+b['name']+f' at x={x:g}. Combine welded pieces into one layer or adjust offsets.')
+                for low,up,lower_shape,upper_shape in [(a['id'],b['id'],ga,gb),(b['id'],a['id'],gb,ga)]:
+                    gap=vertical_bearing_gap(lower_shape,upper_shape)
+                    if gap is not None:
+                        add([(vd(up,x),1.),(vd(low,x),-1.)],'beam_contact',low+'/'+up,x,gap,ck,lower=low,upper=up)
     B=sparse.lil_matrix((len(rows),n))
     for i,rr in enumerate(rows):
         for j,v in rr:B[i,j]=v
     pins=sorted(model['pins'],key=lambda p:p['x']);pin_dofs=[vd(p['beam'],p['x']) for p in pins]
     # Force/moment bookkeeping is taken directly from the assembled generalized
     # loads. Nodal couples from distributed loads are included in the moment.
-    xd=np.zeros(n);rot=np.zeros(n,dtype=bool)
+    xd=np.zeros(n);rot=np.zeros(n,dtype=bool);vertical=np.zeros(n,dtype=bool);vertical_rot=np.zeros(n,dtype=bool)
     for bid,b in nodes.items():
-        xd[b['dofs'][:,0]]=b['x'];rot[b['dofs'][:,1]]=True
-    for c in coils:xd[coil_dofs[c['id']]]=c['x']
-    total=-float(f[~rot].sum());moment=-float(np.dot(f[~rot],xd[~rot])+f[rot].sum())
+        xd[b['dofs'][:,0]]=b['x'];rot[b['dofs'][:,1::2]]=True
+        vertical[b['dofs'][:,0]]=True;vertical_rot[b['dofs'][:,1]]=True
+    for c in coils:xd[coil_dofs[c['id']]]=c['x'];vertical[coil_dofs[c['id']]]=True
+    total=-float(f[vertical].sum());moment=-float(np.dot(f[vertical],xd[vertical])+f[vertical_rot].sum())
     prescribed=np.zeros(n);equal_values=[]
     if model['loading']['equal_reactions']:
         eq=total/len(pins);unbalanced=eq*sum(p['x'] for p in pins)-moment
@@ -289,10 +355,33 @@ def assemble(model,elements_per_span=None):
         for p,d in zip(pins,pin_dofs):prescribed[d]+=eq;equal_values.append(eq)
         fixed=np.array([pin_dofs[0],pin_dofs[-1]],int)
     else:fixed=np.array(pin_dofs,int)
+    lateral_fixed=[];references=[]
+    if coupled:
+        constraints=[] if analysis.get('free_lateral',True) else analysis.get('lateral_constraints',[])
+        for bid,nb in nodes.items():
+            affine_rows=[]
+            for q in [q for q in constraints if q['beam']==bid]:
+                i=int(np.argmin(abs(nb['x']-q['x'])))
+                if abs(nb['x'][i]-q['x'])>1e-6:raise ModelError('A lateral restraint missed its mesh station.')
+                axes=[2,3] if q['kind']=='Displacement and rotation' else [2] if q['kind']=='Displacement' else [3]
+                for axis in axes:
+                    dof=int(nb['dofs'][i,axis]);fixed=np.r_[fixed,dof]
+                    affine_rows.append([1.,(q['x']-nb['x'][0])/span] if axis==2 else [0.,1.])
+                    lateral_fixed.append({**q,'dof':dof,'component':'w' if axis==2 else 'psi'})
+            # Complete only the two unloaded lateral rigid-body modes. These
+            # reference conditions must develop zero physical force/moment.
+            rank=np.linalg.matrix_rank(affine_rows) if affine_rows else 0
+            for i in [0,len(nb['x'])-1]:
+                row=[1.,(nb['x'][i]-nb['x'][0])/span]
+                newrank=np.linalg.matrix_rank(affine_rows+[row])
+                if newrank>rank:
+                    dof=int(nb['dofs'][i,2]);references.append(dof);fixed=np.r_[fixed,dof]
+                    affine_rows.append(row);rank=newrank
     return dict(model=model,g=g,nodes=nodes,elements=elems,K=K.tocsc(),f=f,prescribed=prescribed,
       B=B.tocsr(),k=np.array(ks),gap0=np.array(gaps),meta=meta,fixed=fixed,pins=pins,pin_dofs=pin_dofs,
       coils=coils,rods=rods,weights=weightitems,external=external,total=total,moment=moment,span=span,
-      equal_values=equal_values,rotational=rot)
+      equal_values=equal_values,rotational=rot,lateral_fixed=lateral_fixed,lateral_references=references,
+      vertical_fixed=np.array(pin_dofs if not equal_values else [pin_dofs[0],pin_dofs[-1]],int))
 
 
 def _polish_qp(P,q,A,lo,hi,x,y,max_steps=250):
@@ -363,7 +452,7 @@ def solve_contact(a):
         parts.append(ext);lower.append(np.zeros(nr));upper.append(np.full(nr,np.inf))
     A=sparse.vstack(parts,format='csc');lo=np.concatenate(lower);hi=np.concatenate(upper)
     scaling=np.ones(n+nr)
-    for node in a['nodes'].values():scaling[node['dofs'][:,1]]=1/max(a['span'],1.)
+    for node in a['nodes'].values():scaling[node['dofs'][:,1::2]]=1/max(a['span'],1.)
     D=sparse.diags(scaling);force_scale=max(100.,abs(a['total']))
     Ps=sparse.triu(D@P@D/force_scale,format='csc');As=A@D
     qs=np.r_[-f,np.zeros(nr)]*scaling/force_scale
@@ -396,7 +485,9 @@ def solve_contact(a):
     if contactrows and max(abs(lam[contactrows]*gap[contactrows]))>max(.001,normload*1e-6):raise ModelError('Contact force/gap complementarity failed; this result is not accepted.')
     if rodrows and max(abs(lam[rodrows]-a['k'][rodrows]*np.maximum(-gap[rodrows],0.)))>max(.01,normload*1e-5):raise ModelError('Rod force/extension compatibility failed; this result is not accepted.')
     if max(abs(ground))>max(.001,normload*1e-6):raise ModelError('A member has an unsupported mechanism. Add its missing physical contact or connection.')
-    if a['equal_values'] and max(abs(residual[a['fixed']]))>max(.005,normload*1e-5):raise ModelError('Equal reactions require an additional support force in this layout. Use calculated reactions.')
+    if a['equal_values'] and max(abs(residual[a['vertical_fixed']]))>max(.005,normload*1e-5):raise ModelError('Equal reactions require an additional support force in this layout. Use calculated reactions.')
+    if a['lateral_references'] and max(abs(residual[a['lateral_references']]))>max(.005,normload*1e-5):
+        raise ModelError('The lateral reference conditions carry a physical reaction. Review the lateral restraints.')
     history=[{'iteration':int(result.info.iter),'residual':freeerr,'active':int((lam>max(1e-5,normload*1e-8)).sum()),
               'energy':float(.5*xx@P@xx-np.dot(f,full)),'status':status,'primal_residual':float(result.info.prim_res),
               'dual_residual':float(result.info.dual_res),'polished':polish_steps or int(result.info.status_polish)}]
@@ -404,6 +495,7 @@ def solve_contact(a):
 
 def recover_element(e,u,g,model,s):
     """Force-based recovery integrates curvature and shear (not cubic interpolation)."""
+    if e.coupled:return recover_coupled_element(e,u,g,model,s)
     s=float(s);end=e.K@u[e.dofs]-e.f;V0,M0=end[0],end[1]
     V=V0+e.q*s;M=-M0+V0*s+e.q*s*s/2
     E=model['materials']['frame']['E'];nu=model['materials']['frame']['nu'];G=E/(2*(1+nu))
@@ -424,6 +516,44 @@ def recover_element(e,u,g,model,s):
        'stress_top':float(st),'stress_bottom':float(sb),'stress':float(max(abs(st),abs(sb))),
        'A':sec.A,'I':sec.I,'yc':sec.yc,'ctop':sec.ctop,'cbottom':sec.cbottom,
        'v_reference':float(u[e.dofs[0]]),'rotation_term':float(u[e.dofs[1]]*s),'bending_term':float(bb),'shear_term':float(-sh),
+       'element_start':e.x0,'element_end':e.x1,'side':'right' if s<e.L/2 else 'left'}
+
+
+def recover_coupled_element(e,u,g,model,s):
+    s=float(s);end=e.K@u[e.dofs]-e.f
+    V=np.array([end[0]+e.q*s,end[2]])
+    M=np.array([-end[1]+end[0]*s+e.q*s*s/2,-end[3]+end[2]*s])
+    mat=model['materials']['frame'];E=mat['E'];G=E/(2*(1+mat['nu']))
+    shear=model['analysis']['timoshenko'];turn=np.zeros(2);bend=np.zeros(2);sh=np.zeros(2)
+    if s>0:
+        for root,weight in zip(GROOT,GWEIGHT):
+            x=s/2*(1+root);sec=g.props(e.beam,e.x0+x,shear=shear,coupled=True)
+            mm=np.array([-end[1]+end[0]*x+e.q*x*x/2,-end[3]+end[2]*x])
+            curvature=bending_compliance(sec,E)@mm
+            turn+=s/2*weight*curvature;bend+=s/2*weight*(s-x)*curvature
+            if shear:sh+=s/2*weight*np.array([(end[0]+e.q*x)/(G*sec.As),end[2]/(G*sec.Asz)])
+    origin=u[e.dofs[[0,2]]];rotation=u[e.dofs[[1,3]]]
+    displacement=origin+rotation*s+bend-sh;angle=rotation+turn
+    px=min(max(e.x0+s,e.x0+min(e.L*1e-7,1e-8)),e.x1-min(e.L*1e-7,1e-8))
+    sec=g.props(e.beam,px,coupled=True)
+    if g.beams[e.beam].get('section_type')=='Custom properties':
+        vertices=[(z,y) for z in [sec.zmin,sec.zmax] for y in [sec.ymin,sec.ymax]]
+    else:
+        vertices=[(z,y) for polygon in polygons(g.section(e.beam,px)) for ring in [polygon.exterior,*polygon.interiors] for z,y in ring.coords]
+    coefficients=bending_compliance(sec,1.)@M
+    stresses=[-coefficients@np.array([y-sec.yc,z-sec.zc]) for z,y in vertices]
+    critical=int(np.argmax(np.abs(stresses)))
+    top=[v for (z,y),v in zip(vertices,stresses) if abs(y-sec.ymax)<1e-7]
+    bottom=[v for (z,y),v in zip(vertices,stresses) if abs(y-sec.ymin)<1e-7]
+    return {'x':e.x0+s,'V':float(V[0]),'M':float(M[0]),'v':float(displacement[0]),'theta':float(angle[0]),
+       'lateral_V':float(V[1]),'lateral_M':float(M[1]),'w':float(displacement[1]),'psi':float(angle[1]),
+       'stress_top':float(max(top,key=abs)),'stress_bottom':float(max(bottom,key=abs)),
+       'stress':float(abs(stresses[critical])),'stress_signed':float(stresses[critical]),
+       'stress_min':float(min(stresses)),'stress_max':float(max(stresses)),
+       'critical_z':vertices[critical][0]-sec.zc,'critical_y':vertices[critical][1]-sec.yc,
+       'A':sec.A,'I':sec.I,'Iyy':sec.Iyy,'Izy':sec.Izy,'yc':sec.yc,'ctop':sec.ctop,'cbottom':sec.cbottom,
+       'v_reference':float(origin[0]),'rotation_term':float(rotation[0]*s),'bending_term':float(bend[0]),'shear_term':float(-sh[0]),
+       'w_reference':float(origin[1]),'lateral_rotation_term':float(rotation[1]*s),'lateral_bending_term':float(bend[1]),'lateral_shear_term':float(-sh[1]),
        'element_start':e.x0,'element_end':e.x1,'side':'right' if s<e.L/2 else 'left'}
 
 
@@ -456,14 +586,15 @@ def solve_frame(model,elements_per_span=None,refine_peaks=True):
         ee=[e for e in a['elements'] if e.beam==b['id']];samples=[]
         for e in ee:
             ss=[recover_element(e,u,g,model,s) for s in np.linspace(0,e.L,5)]
-            maxrecovery=max(maxrecovery,abs(ss[-1]['v']-u[e.dofs[2]]))
+            maxrecovery=max(maxrecovery,abs(ss[-1]['v']-u[e.dofs[len(e.dofs)//2]]))
+            if e.coupled:maxrecovery=max(maxrecovery,abs(ss[-1]['w']-u[e.dofs[6]]))
             candidates=[e.L*i/4 for i in range(5)]
             if abs(e.q)>1e-12:
                 s0=-(e.K@u[e.dofs]-e.f)[0]/e.q
                 if 0<s0<e.L:candidates.append(s0)
             # Refine only candidate sampled extrema, preserving interactive speed.
             if refine_peaks:
-                for quantity,absolute in [('stress',False),('v',True)]:
+                for quantity,absolute in [('stress',False),('v',True)]+([('w',True)] if e.coupled else []):
                     yy=[abs(x[quantity]) if absolute else x[quantity] for x in ss]
                     for i in range(1,4):
                         if yy[i]>=yy[i-1] and yy[i]>=yy[i+1] and max(yy)-min(yy)>1e-10:
@@ -489,6 +620,9 @@ def solve_frame(model,elements_per_span=None,refine_peaks=True):
         terms.append({'name':'Distributed gravity / loads','value':distributed})
         results[b['id']]={'beam':b,'samples':samples,'peak_stress':peakstress,'peak_moment':peakM,'peak_deflection':peakv,
                          'point_loads':ll,'moment_terms':terms}
+        if model['analysis'].get('coupled_bending'):
+            results[b['id']].update(peak_lateral_deflection=max(samples,key=lambda x:abs(x['w'])),
+                                   peak_lateral_moment=max(samples,key=lambda x:abs(x['lateral_M'])))
     total=a['total'];rrsum=sum(p['force'] for p in reactions)
     checks={'total_downward':total,'coil_load_per_frame':sum(c['weight'] for c in a['coils']),
       'reaction_sum':rrsum,'vertical_residual':rrsum-total,
@@ -501,13 +635,22 @@ def solve_frame(model,elements_per_span=None,refine_peaks=True):
     checks['free_moment_residual']=float(max(abs(res[free_mask&a['rotational']]),default=0.))
     tol=max(.02,abs(total)*3e-5)
     if abs(checks['vertical_residual'])>tol or abs(checks['moment_residual'])>tol*a['span']:raise ModelError('Global force/moment balance failed. Inspect supports and contact connections.')
-    notes=['Nominal planar beam stresses. Local notch, weld, lug, block and tube-wall strength are not evaluated.',
+    coupled=model['analysis'].get('coupled_bending',False)
+    mode='Coupled vertical and lateral bending' if coupled else 'Simplified planar bending'
+    notes=[mode+'. Local notch, weld, lug, block and tube-wall strength require separate assessment.',
        'Coil cutouts modify the section and stiffness; circular geometry is polygonized for custom curved outlines.',
        'Coils are rigid vertical spacers; bearing is frictionless and represented by vertical resultants.',
        'Rod free-length auto values are geometric estimates. Override them to match the actual welded attachment and nut seat.']
     if model['materials']['rod']['name']=='ASTM A193 B7' and model['rods']:
         notes.append('B7 strengths describe supplied heat-treated rod. They do not establish the strength of its welded attachment/heat-affected region.')
-    return Solution(model,g,a['nodes'],a['elements'],u,forces,reactions,results,a['weights'],pointloads,a['coils'],a['rods'],checks,history,a['K'],a['B'],a['f'],notes)
+    lateral_reactions=[{k:v for k,v in q.items() if k!='dof'}|{'reaction':float(res[q['dof']])} for q in a['lateral_fixed']]
+    checks['bending_mode']=mode
+    if coupled:
+        notes.append('Lateral contacts and tie rods retain the vertical-only load path. Lateral bending uses centroidal force resultants and excludes eccentric-load torsion.')
+        notes.append('Free lateral movement is reported relative to each member end-to-end reference chord.' if model['analysis'].get('free_lateral',True) else 'User-entered lateral restraints hold the selected lateral displacement or bending rotation at zero. Remaining unloaded rigid-body modes use zero-reaction reference conditions.')
+        if any(b.get('section_type')=='Custom properties' for b in model['beams']):
+            notes.append('Manual section stresses use the bounding rectangle defined by the entered centroid-to-edge distances. Draw the actual section to locate exact material-fiber peaks.')
+    return Solution(model,g,a['nodes'],a['elements'],u,forces,reactions,results,a['weights'],pointloads,a['coils'],a['rods'],checks,history,a['K'],a['B'],a['f'],notes,lateral_reactions)
 
 
 def critical_samples(result,quantity):
@@ -528,6 +671,9 @@ def mesh_check(solution):
         for name,key in [('Peak stress','peak_stress'),('Peak movement','peak_deflection')]:
             field='stress' if key=='peak_stress' else 'v';aa=abs(a[key][field]);bb=abs(b[key][field])
             rows.append({'beam':bid,'quantity':name,'current':aa,'refined':bb,'change_percent':100*(bb-aa)/max(bb,1e-12)})
+        if solution.model['analysis'].get('coupled_bending'):
+            aa=abs(a['peak_lateral_deflection']['w']);bb=abs(b['peak_lateral_deflection']['w'])
+            rows.append({'beam':bid,'quantity':'Peak lateral movement','current':aa,'refined':bb,'change_percent':100*(bb-aa)/max(bb,1e-12)})
     for r in solution.rods:
         rr=next(q for q in other.rods if q['id']==r['id']);aa=r['tension'];bb=rr['tension']
         rows.append({'beam':r['id'],'quantity':'Rod tension','current':aa,'refined':bb,'change_percent':100*(bb-aa)/max(abs(bb),1e-12)})

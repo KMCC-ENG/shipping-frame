@@ -30,6 +30,7 @@ class Section:
     zmin: float
     zmax: float
     As: float = 0.
+    Asz: float = 0.
     @property
     def ctop(self): return self.ymax-self.yc
     @property
@@ -52,12 +53,11 @@ def polygons(g):
 
 @lru_cache(maxsize=2048)
 def vertical_bearing_gap(lower,upper):
-    """First vertical closure between two sections with separated y envelopes.
+    """Downward travel of upper before it touches actual lower material.
 
-    Faces must overlap in section depth z. Using only envelope y bounds can
-    falsely seat a narrow upper section on an angle's web located to its side.
-    Polygon faces are piecewise linear, so their minimum vertical separation
-    occurs at a z vertex or at the limit of a vertex interval.
+    Each depth slice can contain several intervals, including the two walls
+    of a closed tube. Test facing intervals instead of the section envelopes.
+    Call with reversed arguments as well to detect an enclosing ceiling.
     """
     z0=max(lower.bounds[0],upper.bounds[0]);z1=min(lower.bounds[2],upper.bounds[2])
     if z1-z0<=1e-9:return None
@@ -65,15 +65,25 @@ def vertical_bearing_gap(lower,upper):
     for region in [lower,upper]:
         for p in polygons(region):
             for ring in [p.exterior,*p.interiors]:levels.update(z for z,y in ring.coords if z0<z<z1)
-    levels=sorted(levels);probes=list(levels)
+    levels=sorted(levels);probes=[]
     for a,b in zip(levels[:-1],levels[1:]):
         h=b-a
-        if h>1e-10:probes.extend([a+h*1e-7,(a+b)/2,b-h*1e-7])
+        if h>1e-10:
+            eps=min(h*1e-8,1e-9)
+            probes.extend([a+eps,(a+b)/2,b-eps])
     y0=min(lower.bounds[1],upper.bounds[1])-1;y1=max(lower.bounds[3],upper.bounds[3])+1
     gaps=[]
     for z in probes:
         line=LineString([(z,y0),(z,y1)]);a=lower.intersection(line);b=upper.intersection(line)
-        if not a.is_empty and not b.is_empty:gaps.append(b.bounds[1]-a.bounds[3])
+        def intervals(region):
+            if region.is_empty:return []
+            if hasattr(region,'geoms'):
+                return [v for child in region.geoms for v in intervals(child)]
+            if region.length<=1e-12:return []
+            return [(region.bounds[1],region.bounds[3])]
+        for bottom,top in intervals(a):
+            for upbottom,uptop in intervals(b):
+                if top<=upbottom+1e-8:gaps.append(upbottom-top)
     return max(0.,min(gaps)) if gaps else None
 
 def ring_integrals(coords):
@@ -92,6 +102,8 @@ def section_properties(g, with_shear=False, allow_sliver=False):
     # exact geometry is the key: no rounding or stiffness approximation.
     if g.is_empty or g.area<=1e-10:
         raise ModelError('A coil cut removes the complete section. Change the beam or coil position/dimensions.')
+    if not allow_sliver and len(polygons(g))>1:
+        raise ModelError('The section contains disconnected material. Model separate members or provide a connected section with the physical shear connection. This check applies with shear deformation on or off.')
     # Shift first, to avoid cancellation for a small section far from the datum.
     ox,oy=g.centroid.x,g.centroid.y
     local=translate(g,xoff=-ox,yoff=-oy)
@@ -215,10 +227,10 @@ def drawing_geometry(shapes,resolution=128):
 @lru_cache(maxsize=2048)
 def _profile_cached(spec_json,resolution):
     c=json.loads(spec_json);typ=c.get('shape','Angle')
-    h=float(c.get('h',3));w=float(c.get('w',3));t=float(c.get('t',.375))
     if typ=='Custom draw':
         g=drawing_geometry(c.get('drawing',[]),resolution)
     else:
+        h=float(c.get('h',3));w=float(c.get('w',3));t=1. if typ=='Flat bar' else float(c.get('t',.375))
         if min(h,w,t)<=0:raise ModelError('Section dimensions must be positive.')
         if typ=='Angle':
             if t>=min(h,w):raise ModelError('Angle thickness must be smaller than height and width.')
@@ -277,20 +289,31 @@ class Geometry:
             if pads:g=unary_union([g,*pads])
         self._gcache[key]=g
         return g
-    def props(self,bid,x,shear=False):
-        key=(bid,round(float(x),10),bool(shear))
+    def props(self,bid,x,shear=False,coupled=False):
+        key=(bid,round(float(x),10),bool(shear),bool(coupled))
         if key in self._scache:return self._scache[key]
         b=self.beams[bid]
         if b.get('section_type')=='Custom properties':
             p=b['manual'];h=p['ctop']+p['cbottom'];yc=b['y']+p['cbottom']
-            s=Section(p['A'],yc,0.,p['I'],p.get('Iyy',p['I']),0.,b['y'],b['y']+h,-p.get('width',1)/2,p.get('width',1)/2,p.get('As',p['A']*5/6))
-        else:s=section_properties(self.section(bid,x),shear)
+            s=Section(p['A'],yc,0.,p['I'],p.get('Iyy') or p['I'],p.get('Izy') or 0.,b['y'],b['y']+h,
+                      -(p.get('cleft') or p.get('width',1)/2),p.get('cright') or p.get('width',1)/2,
+                      p.get('As',p['A']*5/6),p.get('Asz') or 0.)
+        else:
+            outline=self.section(bid,x)
+            s=section_properties(outline,shear)
+            if coupled and shear:
+                lateral=section_properties(rotate(outline,90,origin=(s.zc,s.yc)),True)
+                s=Section(**{**s.__dict__,'Asz':lateral.As})
+        if coupled and (s.Iyy<=0 or s.I*s.Iyy-s.Izy**2<=max(s.I*s.Iyy,1.)*1e-13):
+            raise ModelError('The section inertia matrix is invalid for coupled bending. Check Ixx, Iyy and Iyz.')
         self._scache[key]=s
         return s
     def bounds(self,bid,x=None,cut=False):
         b=self.beams[bid]
         if b.get('section_type')=='Custom properties':
-            p=b['manual'];return (-p.get('width',1)/2,b['y'],p.get('width',1)/2,b['y']+p['ctop']+p['cbottom'])
+            p=b['manual']
+            left=p.get('cleft') or p.get('width',1)/2;right=p.get('cright') or p.get('width',1)/2
+            return (-left,b['y'],right,b['y']+p['ctop']+p['cbottom'])
         if x is None:
             ps=[translate(g,yoff=b['y']) for g in self._profiles[bid]]
             return unary_union(ps).bounds
@@ -328,4 +351,7 @@ class Geometry:
             for q in self.model.get(kind,[]):
                 xs.append(q['x'])
                 if kind=='loads' and q.get('kind')=='Uniform':xs.append(q['end'])
+        analysis=self.model.get('analysis',{})
+        if analysis.get('coupled_bending') and not analysis.get('free_lateral',True):
+            xs.extend(q['x'] for q in analysis.get('lateral_constraints',[]))
         return xs

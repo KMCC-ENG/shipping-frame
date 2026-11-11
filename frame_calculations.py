@@ -12,6 +12,12 @@ def render_calculations(s):
  st.subheader('Calculation worksheet')
  st.caption('Equations → substitutions → results. All forces are lbf, lengths in inches, stresses in psi. Upward forces and counterclockwise couples are positive.')
  m=s.model;lo=m['loading'];mat=m['materials']['frame'];rm=m['materials']['rod'];fac=lo['factor']
+ coupled=m['analysis'].get('coupled_bending',False)
+ st.write('Bending model — '+s.checks['bending_mode'])
+ if coupled:
+  st.write('Free lateral bending with zero-reaction reference conditions.' if m['analysis'].get('free_lateral',True) else 'Lateral displacement and/or bending rotation restrained at the user-entered stations.')
+  st.caption('Member free-body diagrams use the vertical plane. Lateral-restraint reactions are tabulated separately.')
+  if s.lateral_reactions:st.dataframe(pd.DataFrame(s.lateral_reactions),hide_index=True,width='stretch')
  st.markdown('### 1. Section geometry and removed material')
  st.write('The coil circles remove intersecting material from the main beam components. Rectangular blocks remain welded contact pads. Properties are evaluated along each beam; a complete uncut section is not used through a seat.')
  st.latex(r'A(x)=\int_{\Omega_{\rm remaining}(x)}dA,\qquad \bar y(x)=\frac{\int_{\Omega_{\rm remaining}(x)}y\,dA}{A(x)}')
@@ -110,16 +116,32 @@ def render_calculations(s):
    st.latex(fr'M(x_s)={vals}=\boxed{{{p["M"]:.7g}\ \mathrm{{lbf\,in}}}}')
    st.latex(fr'V(x_s)=\boxed{{{p["V"]:.7g}\ \mathrm{{lbf}}}}')
    st.markdown('**Bending stresses at the remaining material surfaces**')
-   st.latex(r'\sigma_t=-\frac{Mc_t}{I},\qquad \sigma_b=\frac{Mc_b}{I}')
-   st.latex(fr'\sigma_t=-\frac{{({p["M"]:.7g})({p["ctop"]:.7g})}}{{{p["I"]:.7g}}}=\boxed{{{p["stress_top"]:.7g}\ \mathrm{{psi}}}}')
-   st.latex(fr'\sigma_b=\frac{{({p["M"]:.7g})({p["cbottom"]:.7g})}}{{{p["I"]:.7g}}}=\boxed{{{p["stress_bottom"]:.7g}\ \mathrm{{psi}}}}')
+   if coupled:
+    st.write('The lateral moment is work-conjugate to positive lateral slope. Fiber y and z are measured from the section centroid. The stress envelope is evaluated over actual section vertices, including void boundaries.')
+    st.latex(r'\begin{bmatrix}\kappa_v\\\kappa_w\end{bmatrix}=\frac{1}{E}\begin{bmatrix}I_z&I_{yz}\\I_{yz}&I_y\end{bmatrix}^{-1}\begin{bmatrix}M_v\\M_w\end{bmatrix}')
+    st.latex(r'\sigma(y,z)=-\frac{(I_yM_v-I_{yz}M_w)y+(I_zM_w-I_{yz}M_v)z}{I_zI_y-I_{yz}^2}')
+    st.latex(fr'I_z={p["I"]:.7g},\quad I_y={p["Iyy"]:.7g},\quad I_{{yz}}={p["Izy"]:.7g}\quad(\mathrm{{in^4}})')
+    st.latex(fr'M_v={p["M"]:.7g},\quad M_w={p["lateral_M"]:.7g}\quad(\mathrm{{lbf\,in}})')
+    st.latex(fr'y={p["critical_y"]:.7g}\ \mathrm{{in}},\quad z={p["critical_z"]:.7g}\ \mathrm{{in}},\quad \sigma=\boxed{{{p["stress_signed"]:.7g}\ \mathrm{{psi}}}}')
+   else:
+    st.latex(r'\sigma_t=-\frac{Mc_t}{I},\qquad \sigma_b=\frac{Mc_b}{I}')
+    st.latex(fr'\sigma_t=-\frac{{({p["M"]:.7g})({p["ctop"]:.7g})}}{{{p["I"]:.7g}}}=\boxed{{{p["stress_top"]:.7g}\ \mathrm{{psi}}}}')
+    st.latex(fr'\sigma_b=\frac{{({p["M"]:.7g})({p["cbottom"]:.7g})}}{{{p["I"]:.7g}}}=\boxed{{{p["stress_bottom"]:.7g}\ \mathrm{{psi}}}}')
    st.caption('Stress is nominal remaining-section bending stress. The maximum can occur away from the maximum moment because I and c change through the seats.')
    st.markdown('**Deflection from curvature and shear**')
-   st.latex(r'G=\frac{E}{2(1+\nu)},\qquad \frac{d\theta}{dx}=\frac{M(x)}{EI(x)}')
-   st.latex(r'v(x)=v_0+\theta_0\ell+\int_0^\ell\frac{(\ell-s)M(s)}{EI(s)}\,ds-\int_0^\ell\frac{V(s)}{GA_s(s)}\,ds')
+   st.latex(r'G=\frac{E}{2(1+\nu)}')
+   if coupled:
+    st.latex(r'v=v_0+\theta_0\ell+\int_0^\ell(\ell-s)\kappa_v(s)\,ds-\int_0^\ell\frac{V_v(s)}{GA_{sv}(s)}\,ds')
+    st.latex(r'w=w_0+\psi_0\ell+\int_0^\ell(\ell-s)\kappa_w(s)\,ds-\int_0^\ell\frac{V_w(s)}{GA_{sw}(s)}\,ds')
+   else:
+    st.latex(r'\frac{d\theta}{dx}=\frac{M(x)}{EI(x)}')
+    st.latex(r'v(x)=v_0+\theta_0\ell+\int_0^\ell\frac{(\ell-s)M(s)}{EI(s)}\,ds-\int_0^\ell\frac{V(s)}{GA_s(s)}\,ds')
    p=r['peak_deflection']
    st.latex(fr'x_v={p["x"]:.7g}\ \mathrm{{in}},\qquad v(x_v)=({p["v_reference"]:.6g})+({p["rotation_term"]:.6g})+({p["bending_term"]:.6g})+({p["shear_term"]:.6g})')
    st.latex(fr'v(x_v)=\boxed{{{p["v"]:.8g}\ \mathrm{{in}}}}')
+   if coupled:
+    p=r['peak_lateral_deflection']
+    st.latex(fr'x_w={p["x"]:.7g}\ \mathrm{{in}},\quad w=({p["w_reference"]:.6g})+({p["lateral_rotation_term"]:.6g})+({p["lateral_bending_term"]:.6g})+({p["lateral_shear_term"]:.6g})=\boxed{{{p["w"]:.8g}\ \mathrm{{in}}}}')
    st.caption('Positive v is upward. Movement is relative to the lifting reference, not solely the member’s local bending bow. The shear integral is zero when shear deformation is disabled.')
  st.markdown('### 6. Equilibrium and numerical checks')
  st.latex(fr'\sum R-W={s.checks["reaction_sum"]:.8g}-{s.checks["total_downward"]:.8g}=\boxed{{{s.checks["vertical_residual"]:.3g}\ \mathrm{{lbf}}}}')
